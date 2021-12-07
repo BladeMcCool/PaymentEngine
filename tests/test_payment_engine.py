@@ -1,4 +1,7 @@
 import unittest
+
+from contextlib import redirect_stdout, redirect_stderr
+import io
 from decimal import Decimal
 
 from payment_engine import PaymentEngine
@@ -18,6 +21,10 @@ class TestAccounting(unittest.TestCase):
         # try string
         # try weird number like "  13  122   . 99 , 5"
         # try weird number like ",122   . 99 , 5"
+        # try weird number like ",122   . 99 , 1./234"
+        pass
+
+    def test__invalid_tx_type__ignored_and_logged(self):
         pass
 
     def test__too_many_decimal_amount__truncated(self):
@@ -32,32 +39,110 @@ class TestAccounting(unittest.TestCase):
         tx = engine.get_tx(123)
         self.assertIsNotNone(tx)
         self.assertTrue(engine.check_tx(tx, engine.FLAG_DEPOSIT))
-        pass
 
     def test__read_transcation_data__without_filename__fails(self):
         # i expect this to raise
         pass
 
     def test__deposit__credits_account(self):
-        pass
+        engine = self.get_payment_engine()
+
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
     def test_redeposit_existing_tx_id__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+
+        f = io.StringIO()
+        with redirect_stderr(f):
+            engine.process_record(["deposit", "55", "1", "1.23"])
+            engine.process_record(["deposit", "55", "1", "999.99"])
+            self.assertEqual(
+                "tx_id 1, client_id 55, failed to apply deposit of $999.99: deposit duplicates existing tx_id\n",
+                f.getvalue()
+            )
+
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
     def test__withdrawal_nsf__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+        f = io.StringIO()
+        with redirect_stderr(f):
+            engine.process_record(["withdrawal", "55", "1", "1.24"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply withdrawal of $1.24: nsf\n", f.getvalue())
+
+        # available and total funds unchanged
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
     def test__withdrawal__debits_account(self):
-        pass
+        engine = self.get_payment_engine()
+
+        # establish a balance
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+        # withdraw it
+        engine.process_record(["withdrawal", "55", "1", "1.23"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["total"])
 
     def test__dispute__holds_funds(self):
-        pass
+        engine = self.get_payment_engine()
+
+        # establish a balance
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+        # dispute it
+        engine.process_record(["dispute", "55", "1"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_DISPUTE))
 
     def test__dispute_nonexisting_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        f = io.StringIO()
+        with redirect_stderr(f):
+            engine.process_record(["dispute", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx not found\n", f.getvalue())
+
+    def test__dispute_otherclient_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "44", "987", "1.23"])
+
+        f = io.StringIO()
+        with redirect_stderr(f):
+            engine.process_record(["dispute", "55", "987"])
+            self.assertEqual("tx_id 987, client_id 55, failed to apply dispute: tx client_id mismatch\n", f.getvalue())
+
         pass
 
     def test__dispute_nondeposit_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", ".23"])
+
+        f = io.StringIO()
+        with redirect_stderr(f):
+            engine.process_record(["dispute", "55", "2"])
+            # we dont track withdrawal tx for dispute etc b/c it logically makes no sense.
+            self.assertEqual("tx_id 2, client_id 55, failed to apply dispute: tx is not a deposit\n", f.getvalue())
+
         pass
+
+    #######################
 
     def test__resolve__releases_funds(self):
         pass
@@ -106,18 +191,15 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(False, account_totals[2]["locked"])
 
     def test__sample1_output_matches_expected(self):
-        from contextlib import redirect_stdout
-        import io
-
         engine = PaymentEngine("fixtures/sample1.csv")
 
         f = io.StringIO()
         with redirect_stdout(f):
             engine.generate_output()
         csv_output = f.getvalue()
-        expect_output = ("client,available,held,total,locked\r\n"
-                         "1,1.5,0,1.5,false\r\n"
-                         "2,2,0,2,false\r\n")
+        expect_output = ("client,available,held,total,locked\n"
+                         "1,1.5,0,1.5,false\n"
+                         "2,2,0,2,false\n")
         self.assertEqual(expect_output, csv_output)
 
     # brainstorming stuff:
