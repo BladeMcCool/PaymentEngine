@@ -4,10 +4,17 @@ from decimal import Decimal, ROUND_DOWN
 
 
 class PaymentEngine:
+    FLAG_DEPOSIT = 1
+    FLAG_WITHDRAWAL = 2
+    FLAG_DISPUTE = 4
+    FLAG_RESOLVE = 8
+    FLAG_CHARGEBACK = 16
+
     def __init__(self, filename):
         self.filename = filename
         self.account_totals = {}
         self.valid_record_types = {"deposit", "withdrawal", "dispute", "resolve", "chargeback"}
+        self.tx_log = {}
 
         self.type_field_idx = 0
         self.client_field_idx = 1
@@ -22,16 +29,15 @@ class PaymentEngine:
                 self.validate_record(record)
                 self.process_record(record)
 
-
     def process_record(self, record):
-        record_type = record[self.type_field_idx]
-        client_id = int(record[self.client_field_idx])
+        record_type = record[self.type_field_idx].strip()
+        client_id = int(record[self.client_field_idx].strip())
+        tx_id = int(record[self.tx_field_idx].strip())
 
-
-        #ownfunc
+        # ownfunc
         if client_id not in self.account_totals:
             self.account_totals[client_id] = {
-                "available":Decimal(0),
+                "available": Decimal(0),
                 "held": Decimal(0),
                 "total": Decimal(0),
                 "locked": False,
@@ -43,11 +49,27 @@ class PaymentEngine:
             amount = self.get_normalized_amount(record)
             client_accounting["available"] += amount
             client_accounting["total"] += amount
+            self.add_tx_log(tx_id, self.FLAG_DEPOSIT, amount)
         elif record_type == "withdrawal":
             amount = self.get_normalized_amount(record)
             if client_accounting["available"] >= amount:
                 client_accounting["available"] -= amount
                 client_accounting["total"] -= amount
+                self.add_tx_log(tx_id, self.FLAG_WITHDRAWAL, amount)
+            else:
+                # log nsf
+                pass
+
+    def get_tx(self, tx_id):
+        return self.tx_log.get(tx_id)
+
+    def check_tx(self, tx, tx_type):
+        return tx[0] & tx_type
+
+    def add_tx_log(self, tx_id, tx_type, amount):
+        # we will have an issue if we dont have enough memory for all the tx tracking.
+        if tx_id not in self.tx_log and tx_type == self.FLAG_DEPOSIT:
+            self.tx_log[tx_id] = [self.FLAG_DEPOSIT, amount]
 
     def get_normalized_amount(self, record):
         return Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'), rounding=ROUND_DOWN).normalize()
@@ -62,7 +84,6 @@ class PaymentEngine:
 
     def generate_output(self):
         self.read_transaction_data()
-        # todo proper csv output
         csvwriter = csv.writer(sys.stdout)
         fieldnames = ['client', 'available', 'held', 'total', 'locked']
         csvwriter.writerow(fieldnames)
@@ -74,10 +95,7 @@ class PaymentEngine:
                 client_accounting["total"],
                 str(client_accounting["locked"]).lower(),
             ])
-        # print(repr(self.account_totals))
 
 
 if __name__ == '__main__':
     PaymentEngine(sys.argv[1]).generate_output()
-
-
