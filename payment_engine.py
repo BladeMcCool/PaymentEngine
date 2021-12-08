@@ -28,6 +28,16 @@ class PaymentEngine:
             for record in csvreader:
                 self.process_record(record)
 
+    def get_client_record(self, client_id):
+        if client_id not in self.account_totals:
+            self.account_totals[client_id] = {
+                "available": Decimal(0),
+                "held": Decimal(0),
+                "total": Decimal(0),
+                "locked": False,
+            }
+        return self.account_totals[client_id]
+
     def process_record(self, record):
 
         self.normalize_record(record)
@@ -36,7 +46,6 @@ class PaymentEngine:
         record_type = record[self.type_field_idx]
         client_id = record[self.client_field_idx]
         tx_id = record[self.tx_field_idx]
-        # print("also .. %s" % repr(record))
 
         existing_tx = self.get_tx(tx_id)
 
@@ -44,66 +53,108 @@ class PaymentEngine:
             self.error_log("tx client_id mismatch", tx_id, client_id, record_type)
             return
 
-        # ownfunc
-        if client_id not in self.account_totals:
-            self.account_totals[client_id] = {
-                "available": Decimal(0),
-                "held": Decimal(0),
-                "total": Decimal(0),
-                "locked": False,
-            }
-
-        client_accounting = self.account_totals[client_id]
+        client_accounting = self.get_client_record(client_id)
 
         if record_type == "deposit":
-            amount = record[self.amount_field_idx]
-            if not existing_tx:
-                client_accounting["available"] += amount
-                client_accounting["total"] += amount
-                self.add_tx_log(tx_id, client_id, self.FLAG_DEPOSIT, amount)
-            else:
-                self.error_log("deposit duplicates existing tx_id", tx_id, client_id, record_type, amount)
-
+            self.process_deposit(client_accounting, record, existing_tx, tx_id, client_id)
         elif record_type == "withdrawal":
-            amount = record[self.amount_field_idx]
-
-            if client_accounting["available"] >= amount:
-                client_accounting["available"] -= amount
-                client_accounting["total"] -= amount
-                self.add_tx_log(tx_id, client_id, self.FLAG_WITHDRAWAL, amount)
-            else:
-                # log nsf
-                self.error_log("nsf", tx_id, client_id, record_type, amount)
-
+            self.process_withdrawal(client_accounting, record, tx_id, client_id)
         elif record_type == "dispute":
-            if existing_tx:
-                if self.check_tx(existing_tx, self.FLAG_DEPOSIT):
-                    amount = existing_tx[2]
-                    client_accounting["available"] -= amount
-                    client_accounting["held"] += amount
-                    self.add_tx_log(tx_id, client_id, self.FLAG_DISPUTE, amount)
-                else:
-                    self.error_log("tx is not a deposit", tx_id, client_id, record_type)
-
-            else:
-                self.error_log("tx not found", tx_id, client_id, record_type)
-
+            self.process_dispute(client_accounting, existing_tx, tx_id, client_id)
         elif record_type == "resolve":
-            if existing_tx:
-                if not self.check_tx(existing_tx, self.FLAG_DEPOSIT):
-                    self.error_log("tx has no deposit", tx_id, client_id, record_type)
-                else:
-                    if self.check_tx(existing_tx, self.FLAG_DISPUTE):
-                        amount = existing_tx[2]
-                        client_accounting["held"] -= amount
-                        client_accounting["available"] += amount
-                        self.add_tx_log(tx_id, client_id, self.FLAG_RESOLVE, amount)
-                    else:
-                        self.error_log("tx is not disputed", tx_id, client_id, record_type)
+            self.process_resolve(client_accounting, existing_tx, tx_id, client_id)
+        elif record_type == "chargeback":
+            self.process_chargeback(client_accounting, existing_tx, tx_id, client_id)
 
-            else:
-                self.error_log("tx not found", tx_id, client_id, record_type)
+    def process_deposit(self, client_accounting, record, existing_tx, tx_id, client_id):
+        amount = record[self.amount_field_idx]
+        if existing_tx:
+            self.error_log("deposit duplicates existing tx_id", tx_id, client_id, "deposit", amount)
+            return
 
+        client_accounting["available"] += amount
+        client_accounting["total"] += amount
+        self.add_tx_log(tx_id, client_id, self.FLAG_DEPOSIT, amount)
+
+    def process_withdrawal(self, client_accounting, record, tx_id, client_id):
+        amount = record[self.amount_field_idx]
+        if client_accounting["available"] < amount:
+            self.error_log("nsf", tx_id, client_id, "withdrawal", amount)
+            return
+
+        client_accounting["available"] -= amount
+        client_accounting["total"] -= amount
+        self.add_tx_log(tx_id, client_id, self.FLAG_WITHDRAWAL, amount)
+
+    def process_dispute(self, client_accounting, existing_tx, tx_id, client_id):
+        record_type = "dispute"
+        if not existing_tx:
+            self.error_log("tx not found", tx_id, client_id, record_type)
+            return
+
+        if not self.check_tx(existing_tx, self.FLAG_DEPOSIT):
+            self.error_log("tx is not a deposit", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_CHARGEBACK):
+            self.error_log("tx is charged back", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_RESOLVE):
+            self.error_log("tx is resolved", tx_id, client_id, record_type)
+            return
+
+        amount = existing_tx[2]
+        client_accounting["available"] -= amount
+        client_accounting["held"] += amount
+        self.add_tx_log(tx_id, client_id, self.FLAG_DISPUTE, amount)
+
+    def process_resolve(self, client_accounting, existing_tx, tx_id, client_id):
+        record_type = "resolve"
+        if not existing_tx:
+            self.error_log("tx not found", tx_id, client_id, record_type)
+            return
+
+        if not self.check_tx(existing_tx, self.FLAG_DEPOSIT):
+            self.error_log("tx is not a deposit", tx_id, client_id, record_type)
+            return
+
+        if not self.check_tx(existing_tx, self.FLAG_DISPUTE):
+            self.error_log("tx is not disputed", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_CHARGEBACK):
+            self.error_log("tx is charged back", tx_id, client_id, record_type)
+            return
+
+        amount = existing_tx[2]
+        client_accounting["held"] -= amount
+        client_accounting["available"] += amount
+        self.add_tx_log(tx_id, client_id, self.FLAG_RESOLVE, amount)
+        
+    def process_chargeback(self, client_accounting, existing_tx, tx_id, client_id):
+        record_type = "chargeback"
+        if not existing_tx:
+            self.error_log("tx not found", tx_id, client_id, record_type)
+            return
+
+        if not self.check_tx(existing_tx, self.FLAG_DEPOSIT):
+            self.error_log("tx is not a deposit", tx_id, client_id, record_type)
+            return
+
+        if not self.check_tx(existing_tx, self.FLAG_DISPUTE):
+            self.error_log("tx is not disputed", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_RESOLVE):
+            self.error_log("tx is resolved", tx_id, client_id, record_type)
+            return
+
+        amount = existing_tx[2]
+        client_accounting["held"] -= amount
+        client_accounting["total"] -= amount
+        client_accounting["locked"] = True
+        self.add_tx_log(tx_id, client_id, self.FLAG_CHARGEBACK, amount)
 
     def error_log(self, message, tx_id, client_id, record_type, amount=None):
         formatted_prefix = f"tx_id {tx_id}, client_id {client_id}, failed to apply {record_type}"
@@ -111,12 +162,6 @@ class PaymentEngine:
         if amount:
             amount_detail = f" of ${amount}"
         print(f"{formatted_prefix}{amount_detail}: {message}", file=sys.stderr)
-
-    # def get_tx(self, tx_id, client_id):
-    #     tx_record = self.tx_log.get(tx_id)
-    #     if tx_record[2] != client_id:
-    #         raise ValueError("client id mismatch")
-    #     return tx_record
 
     def get_tx(self, tx_id):
         return self.tx_log.get(tx_id)
@@ -134,7 +179,6 @@ class PaymentEngine:
 
         self.tx_log[tx_id][0] |= tx_type
 
-
     def get_normalized_amount(self, record):
         if record[self.type_field_idx] not in {"deposit", "withdrawal"}:
             return None
@@ -148,8 +192,6 @@ class PaymentEngine:
         record[self.tx_field_idx] = int(record[self.tx_field_idx].strip())
         amount = self.get_normalized_amount(record)
         if amount:
-            # print(repr(amount))
-            # print(repr(record))
             record[self.amount_field_idx] = amount
         return record
 

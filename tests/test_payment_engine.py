@@ -8,7 +8,7 @@ from payment_engine import PaymentEngine
 
 
 @contextlib.contextmanager
-def err_capture(*args, **kwds):
+def err_capture():
     buffer = io.StringIO()
     with redirect_stderr(buffer):
         try:
@@ -101,6 +101,7 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["withdrawal", "55", "1", "1.23"])
         self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("0"), engine.account_totals[55]["total"])
+        self.assertFalse(engine.account_totals[55]["locked"])
 
     def test__dispute__holds_funds(self):
         engine = self.get_payment_engine()
@@ -116,6 +117,7 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["held"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertFalse(engine.account_totals[55]["locked"])
         self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_DISPUTE))
 
     def test__dispute_nonexisting_tx__ignored_and_logged(self):
@@ -141,6 +143,27 @@ class TestAccounting(unittest.TestCase):
             engine.process_record(["dispute", "55", "2"])
             self.assertEqual("tx_id 2, client_id 55, failed to apply dispute: tx is not a deposit\n", buffer.getvalue())
 
+    def test__dispute_chargedback_tx__ignored_and_logged(self):
+        # cannot dispute something that was already chargedback
+        engine = self.get_payment_engine()
+        with err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "1.23"])
+            engine.process_record(["dispute", "55", "1"])
+            engine.process_record(["chargeback", "55", "1"])
+            engine.process_record(["dispute", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is charged back\n", buffer.getvalue())
+
+    def test__dispute_resolved_tx__ignored_and_logged(self):
+        # cannot dispute something that was already resolved
+        engine = self.get_payment_engine()
+        with err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "1.23"])
+            engine.process_record(["dispute", "55", "1"])
+            engine.process_record(["resolve", "55", "1"])
+            engine.process_record(["dispute", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is resolved\n", buffer.getvalue())
+
+
     def test__resolve__releases_funds(self):
         engine = self.get_payment_engine()
 
@@ -152,6 +175,7 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["held"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertFalse(engine.account_totals[55]["locked"])
         self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_DISPUTE))
 
         # resolve it + check status is as expected
@@ -159,6 +183,7 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("0"), engine.account_totals[55]["held"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertFalse(engine.account_totals[55]["locked"])
         self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_RESOLVE))
 
     def test__resolve_nonexisting_tx__ignored_and_logged(self):
@@ -174,9 +199,7 @@ class TestAccounting(unittest.TestCase):
 
         with err_capture() as buffer:
             engine.process_record(["resolve", "55", "2"])
-            self.assertEqual("tx_id 2, client_id 55, failed to apply resolve: tx has no deposit\n", buffer.getvalue())
-
-        pass
+            self.assertEqual("tx_id 2, client_id 55, failed to apply resolve: tx is not a deposit\n", buffer.getvalue())
 
     def test__resolve_nondisputed_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
@@ -187,27 +210,100 @@ class TestAccounting(unittest.TestCase):
             engine.process_record(["resolve", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx is not disputed\n", buffer.getvalue())
 
-        pass
-
     def test__resolve_chargedback_tx__ignored_and_logged(self):
         # cannot resolve something that was already charged back
-        pass
 
-    def test__chargeback__debits_and_freezes_account(self):
-        pass
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["dispute", "55", "1"])
+        engine.process_record(["chargeback", "55", "1"])
 
-    def test__chargeback_nondeposit_tx__ignored_and_logged(self):
-        pass
+        with err_capture() as buffer:
+            engine.process_record(["resolve", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx is charged back\n", buffer.getvalue())
+
+    def test__chargeback__debits_and_locks_account(self):
+        engine = self.get_payment_engine()
+
+        # establish a balance
+        engine.process_record(["deposit", "55", "1", "1.23"])
+
+        # dispute it + check status is as expected
+        engine.process_record(["dispute", "55", "1"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertFalse(engine.account_totals[55]["locked"])
+        self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_DISPUTE))
+
+        # chargeback it + check status is as expected
+        engine.process_record(["chargeback", "55", "1"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["total"])
+        self.assertTrue(engine.account_totals[55]["locked"])
+        self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_CHARGEBACK))
 
     def test__chargeback_nonexisting_tx__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+        with err_capture() as buffer:
+            engine.process_record(["chargeback", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx not found\n", buffer.getvalue())
+
+    def test__chargeback_nondeposit_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", ".23"])
+
+        with err_capture() as buffer:
+            engine.process_record(["chargeback", "55", "2"])
+            self.assertEqual("tx_id 2, client_id 55, failed to apply chargeback: tx is not a deposit\n", buffer.getvalue())
 
     def test__chargeback_nondisputed_tx__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", ".23"])
+
+        with err_capture() as buffer:
+            engine.process_record(["chargeback", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is not disputed\n", buffer.getvalue())
 
     def test__chargeback_resolved_tx__ignored_and_logged(self):
         # cannot charge back a tx that was resolved
-        pass
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["dispute", "55", "1"])
+        engine.process_record(["resolve", "55", "1"])
+
+        with err_capture() as buffer:
+            engine.process_record(["chargeback", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is resolved\n", buffer.getvalue())
+
+    # def test__operation_on_finalized_tx__ignored_and_logged(self):
+    #     # cannot do anything more on a tx that was either charged back or resolved.
+    #
+    #     # cannot charge back a tx that was resolved
+    #     engine = self.get_payment_engine()
+    #     engine.process_record(["deposit", "55", "1", "1.23"])
+    #     engine.process_record(["dispute", "55", "1"])
+    #     engine.process_record(["resolve", "55", "1"])
+    #
+    #     with err_capture() as buffer:
+    #         engine.process_record(["chargeback", "55", "1"])
+    #         self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is finalized\n", buffer.getvalue())
+    #
+    #     # cannot charge back a tx that was charged back
+    #     engine = self.get_payment_engine()
+    #     engine.process_record(["deposit", "55", "1", "1.23"])
+    #     engine.process_record(["dispute", "55", "1"])
+    #     engine.process_record(["chargeback", "55", "1"])
+    #
+    #     with err_capture() as buffer:
+    #         engine.process_record(["chargeback", "55", "1"])
+    #         self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is finalized\n", buffer.getvalue())
+    #
+    #
+    #     raise NotImplementedError("probably add a finalized flag")
 
     def test__sample1_results_matches_expected(self):
         engine = PaymentEngine("fixtures/sample1.csv")
