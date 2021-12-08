@@ -88,6 +88,22 @@ class PaymentEngine:
             else:
                 self.error_log("tx not found", tx_id, client_id, record_type)
 
+        elif record_type == "resolve":
+            if existing_tx:
+                if not self.check_tx(existing_tx, self.FLAG_DEPOSIT):
+                    self.error_log("tx has no deposit", tx_id, client_id, record_type)
+                else:
+                    if self.check_tx(existing_tx, self.FLAG_DISPUTE):
+                        amount = existing_tx[2]
+                        client_accounting["held"] -= amount
+                        client_accounting["available"] += amount
+                        self.add_tx_log(tx_id, client_id, self.FLAG_RESOLVE, amount)
+                    else:
+                        self.error_log("tx is not disputed", tx_id, client_id, record_type)
+
+            else:
+                self.error_log("tx not found", tx_id, client_id, record_type)
+
 
     def error_log(self, message, tx_id, client_id, record_type, amount=None):
         formatted_prefix = f"tx_id {tx_id}, client_id {client_id}, failed to apply {record_type}"

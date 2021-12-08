@@ -1,10 +1,20 @@
+import contextlib
 import unittest
-
 from contextlib import redirect_stdout, redirect_stderr
 import io
 from decimal import Decimal
-
 from payment_engine import PaymentEngine
+
+
+
+@contextlib.contextmanager
+def err_capture(*args, **kwds):
+    buffer = io.StringIO()
+    with redirect_stderr(buffer):
+        try:
+            yield buffer
+        finally:
+            buffer.close()
 
 
 class TestAccounting(unittest.TestCase):
@@ -53,14 +63,12 @@ class TestAccounting(unittest.TestCase):
 
     def test_redeposit_existing_tx_id__ignored_and_logged(self):
         engine = self.get_payment_engine()
-
-        f = io.StringIO()
-        with redirect_stderr(f):
+        with err_capture() as buffer:
             engine.process_record(["deposit", "55", "1", "1.23"])
             engine.process_record(["deposit", "55", "1", "999.99"])
             self.assertEqual(
                 "tx_id 1, client_id 55, failed to apply deposit of $999.99: deposit duplicates existing tx_id\n",
-                f.getvalue()
+                buffer.getvalue()
             )
 
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
@@ -73,10 +81,9 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
-        f = io.StringIO()
-        with redirect_stderr(f):
+        with err_capture() as buffer:
             engine.process_record(["withdrawal", "55", "1", "1.24"])
-            self.assertEqual("tx_id 1, client_id 55, failed to apply withdrawal of $1.24: nsf\n", f.getvalue())
+            self.assertEqual("tx_id 1, client_id 55, failed to apply withdrawal of $1.24: nsf\n", buffer.getvalue())
 
         # available and total funds unchanged
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
@@ -113,50 +120,76 @@ class TestAccounting(unittest.TestCase):
 
     def test__dispute_nonexisting_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
-        f = io.StringIO()
-        with redirect_stderr(f):
+        with err_capture() as buffer:
             engine.process_record(["dispute", "55", "1"])
-            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx not found\n", f.getvalue())
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx not found\n", buffer.getvalue())
 
     def test__dispute_otherclient_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "44", "987", "1.23"])
 
-        f = io.StringIO()
-        with redirect_stderr(f):
+        with err_capture() as buffer:
             engine.process_record(["dispute", "55", "987"])
-            self.assertEqual("tx_id 987, client_id 55, failed to apply dispute: tx client_id mismatch\n", f.getvalue())
-
-        pass
+            self.assertEqual("tx_id 987, client_id 55, failed to apply dispute: tx client_id mismatch\n", buffer.getvalue())
 
     def test__dispute_nondeposit_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        f = io.StringIO()
-        with redirect_stderr(f):
+        with err_capture() as buffer:
             engine.process_record(["dispute", "55", "2"])
-            # we dont track withdrawal tx for dispute etc b/c it logically makes no sense.
-            self.assertEqual("tx_id 2, client_id 55, failed to apply dispute: tx is not a deposit\n", f.getvalue())
-
-        pass
-
-    #######################
+            self.assertEqual("tx_id 2, client_id 55, failed to apply dispute: tx is not a deposit\n", buffer.getvalue())
 
     def test__resolve__releases_funds(self):
-        pass
+        engine = self.get_payment_engine()
+
+        # establish a balance
+        engine.process_record(["deposit", "55", "1", "1.23"])
+
+        # dispute it + check status is as expected
+        engine.process_record(["dispute", "55", "1"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_DISPUTE))
+
+        # resolve it + check status is as expected
+        engine.process_record(["resolve", "55", "1"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("0"), engine.account_totals[55]["held"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertTrue(engine.check_tx(engine.get_tx(1), engine.FLAG_RESOLVE))
 
     def test__resolve_nonexisting_tx__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+        with err_capture() as buffer:
+            engine.process_record(["resolve", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx not found\n", buffer.getvalue())
 
     def test__resolve_nondeposit_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", ".23"])
+
+        with err_capture() as buffer:
+            engine.process_record(["resolve", "55", "2"])
+            self.assertEqual("tx_id 2, client_id 55, failed to apply resolve: tx has no deposit\n", buffer.getvalue())
+
         pass
 
     def test__resolve_nondisputed_tx__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", ".23"])
+
+        with err_capture() as buffer:
+            engine.process_record(["resolve", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx is not disputed\n", buffer.getvalue())
+
         pass
 
-    def test__reolve_chargedback_tx__ignored_and_logged(self):
+    def test__resolve_chargedback_tx__ignored_and_logged(self):
         # cannot resolve something that was already charged back
         pass
 
