@@ -2,7 +2,7 @@ import contextlib
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 import io
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from payment_engine import PaymentEngine
 
 
@@ -21,25 +21,85 @@ class TestAccounting(unittest.TestCase):
         return PaymentEngine(filename)
 
     def test__invalid_client_id__rejected(self):
-        pass
+        # client id must be >= 1 and <= 65535
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "-100", "1", "1.23"])
+            engine.process_record(["deposit", "0", "2", "1.23"])
+            engine.process_record(["deposit", "65536", "3", "1.23"])
+            engine.process_record(["deposit", "88", "4", "1.23"])
+            engine.process_record(["deposit", "1", "33", "1.24"])
+            engine.process_record(["deposit", "65535", "3", "1.25"])
+            self.assertEqual(3, buffer.getvalue().count("invalid client_id"))
+
+        self.assertNotIn(-100, engine.account_totals)
+        self.assertNotIn(0, engine.account_totals)
+        self.assertNotIn(65536, engine.account_totals)
+        self.assertEqual(Decimal("1.23"), engine.account_totals[88]["total"])
+        self.assertEqual(Decimal("1.24"), engine.account_totals[1]["total"])
+        self.assertEqual(Decimal("1.25"), engine.account_totals[65535]["total"])
 
     def test__invalid_tx_id__rejected(self):
-        pass
+        # tx id must be >= 1 and <= 4294967295
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "1", "-1", "1.23"])
+            engine.process_record(["deposit", "2", "0", "1.23"])
+            engine.process_record(["deposit", "3", "1", "1.33"])
+            engine.process_record(["deposit", "4", "4294967295", "1.44"])
+            engine.process_record(["deposit", "5", "4294967296", "1.24"])
+            self.assertEqual(3, buffer.getvalue().count("invalid tx_id"))
+
+        self.assertNotIn(1, engine.account_totals)
+        self.assertNotIn(2, engine.account_totals)
+        self.assertNotIn(5, engine.account_totals)
+        self.assertEqual(Decimal("1.33"), engine.account_totals[3]["total"])
+        self.assertEqual(Decimal("1.44"), engine.account_totals[4]["total"])
+
+    def test__normalize_record_failure__logged_and_skipped(self):
+        # because of the possibilty of a failed typecast we should handle failure gracefully.
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "invalidclient", "1", "1.33"])
+            engine.process_record(["deposit", "3", "invalidtx", "1.33"])
+            engine.process_record(["deposit", "3", "3", "invalidamount"])
+            engine.process_record([])
+            engine.process_record(["corn", "potato"])
+            err_output = buffer.getvalue()
+            self.assertIn("invalid literal for int() with base 10: 'invalidclient'", err_output)
+            self.assertIn("invalid literal for int() with base 10: 'invalidtx'", err_output)
+            self.assertIn("<class 'decimal.ConversionSyntax'>", err_output)
+            self.assertIn("list index out of range while attempting to normalize", err_output)
+            self.assertIn("invalid literal for int() with base 10: 'potato'", err_output)
 
     def test__invalid_amount__rejected(self):
-        # try string
-        # try weird number like "  13  122   . 99 , 5"
-        # try weird number like ",122   . 99 , 5"
-        # try weird number like ",122   . 99 , 1./234"
-        pass
+        engine = self.get_payment_engine()
+        with self.assertRaises(InvalidOperation):
+            engine.get_normalized_amount(["deposit", "1", "1", "  13  122   . 99 , 5"])
+
+        with self.assertRaises(InvalidOperation):
+            engine.get_normalized_amount(["deposit", "1", "1", ",122   . 99 , 1./234"])
 
     def test__invalid_tx_type__ignored_and_logged(self):
-        pass
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "0"])
+            engine.process_record(["bacon", "55", "123", "17.64"])
+            self.assertEqual(Decimal("0"), engine.account_totals[55]["total"])
+            self.assertIn('bacon: invalid record_type', buffer.getvalue())
 
     def test__too_many_decimal_amount__truncated(self):
         # chose to round down in all cases.
         # this requirement possibly could change to round up or down according to different rounding rules
-        pass
+        engine = self.get_payment_engine()
+        tx_id = 0
+        for try_amount in [
+            "5.7245462362",
+            "5.72459",
+            "5.72451"
+        ]:
+            tx_id += 1
+            self.assertEqual(Decimal("5.7245"), engine.get_normalized_amount(["deposit", "1", tx_id, try_amount]))
 
     def test__whitespace_around_values__stripped_silently(self):
         engine = self.get_payment_engine()
@@ -51,14 +111,25 @@ class TestAccounting(unittest.TestCase):
 
     def test__read_transcation_data__without_filename__fails(self):
         # i expect this to raise
-        pass
+        engine = self.get_payment_engine()
+        with self.assertRaises(RuntimeError) as test_exc:
+            engine.read_transaction_data()
+
+        self.assertEqual(
+            'no filename to read has been set. aborting.',
+            str(test_exc.exception)
+        )
 
     def test__deposit__credits_account(self):
         engine = self.get_payment_engine()
-
         engine.process_record(["deposit", "55", "1", "1.23"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+        # though it may be silly, it doesnt seem unreasonable to allow deposit of 0, it should just have no actual effect on the balance.
+        engine.process_record(["deposit", "55", "2", "0"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
 
     def test_deposit_existing_tx_id__ignored_and_logged(self):
         engine = self.get_payment_engine()
@@ -184,7 +255,8 @@ class TestAccounting(unittest.TestCase):
             engine.process_record(["deposit", "55", "1", "1.23"])
             engine.process_record(["dispute", "55", "1"])
             engine.process_record(["dispute", "55", "1"])
-            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is already disputed\n", buffer.getvalue())
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is already disputed\n",
+                             buffer.getvalue())
 
     def test__resolve__releases_funds(self):
         engine = self.get_payment_engine()
@@ -335,7 +407,6 @@ class TestAccounting(unittest.TestCase):
                 "tx_id 2, client_id 55, failed to apply dispute: tx is charged back\n"
             ), buffer.getvalue())
 
-
     def test__sample1_results_matches_expected(self):
         engine = PaymentEngine("fixtures/sample1.csv")
         account_totals = engine.get_account_totals()
@@ -390,4 +461,3 @@ class TestAccounting(unittest.TestCase):
     # if input had too many decimal places are we rounding or truncating?
     # consider 180 day chargeback window? b/c otherwise we hae to track all tx ids indefinitely in memory or make use of the file system/external db
     #  ... theres no dates on the tx, so can't really know.
-

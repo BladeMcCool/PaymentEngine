@@ -1,6 +1,6 @@
 import csv
 import sys
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 
 
 class PaymentEngine:
@@ -22,6 +22,8 @@ class PaymentEngine:
         self.amount_field_idx = 3
 
     def read_transaction_data(self):
+        if not self.filename:
+            raise RuntimeError("no filename to read has been set. aborting.")
         with open(self.filename) as file:
             csvreader = csv.reader(file)
             _ = next(csvreader)  # read and discard header -- but maybe we should interpret it for record field order?
@@ -40,8 +42,11 @@ class PaymentEngine:
 
     def process_record(self, record):
 
-        self.normalize_record(record)
-        self.validate_record(record)
+        if not self.attempt_normalize_record(record):
+            return
+
+        if not self.validate_record(record):
+            return
 
         record_type = record[self.type_field_idx]
         client_id = record[self.client_field_idx]
@@ -58,7 +63,7 @@ class PaymentEngine:
         if record_type == "deposit":
             self.process_deposit(client_accounting, existing_tx, tx_id, client_id, record)
         elif record_type == "withdrawal":
-            self.process_withdrawal(client_accounting,existing_tx, tx_id, client_id, record)
+            self.process_withdrawal(client_accounting, existing_tx, tx_id, client_id, record)
         elif record_type == "dispute":
             self.process_dispute(client_accounting, existing_tx, tx_id, client_id)
         elif record_type == "resolve":
@@ -144,7 +149,7 @@ class PaymentEngine:
         client_accounting["held"] -= amount
         client_accounting["available"] += amount
         self.add_tx_log(tx_id, client_id, self.FLAG_RESOLVE, amount)
-        
+
     def process_chargeback(self, client_accounting, existing_tx, tx_id, client_id):
         record_type = "chargeback"
         if not existing_tx:
@@ -173,12 +178,15 @@ class PaymentEngine:
         client_accounting["locked"] = True
         self.add_tx_log(tx_id, client_id, self.FLAG_CHARGEBACK, amount)
 
-    def error_log(self, message, tx_id, client_id, record_type, amount=None):
-        formatted_prefix = f"tx_id {tx_id}, client_id {client_id}, failed to apply {record_type}"
-        amount_detail = ""
-        if amount:
-            amount_detail = f" of ${amount}"
-        print(f"{formatted_prefix}{amount_detail}: {message}", file=sys.stderr)
+    def error_log(self, message, tx_id=None, client_id=None, record_type=None, amount=None):
+        if tx_id is not None and client_id is not None and record_type is not None:
+            formatted_prefix = f"tx_id {tx_id}, client_id {client_id}, failed to apply {record_type}"
+            amount_detail = ""
+            if amount:
+                amount_detail = f" of ${amount}"
+            print(f"{formatted_prefix}{amount_detail}: {message}", file=sys.stderr)
+        else:
+            print(f"transaction error: {message}", file=sys.stderr)
 
     def get_tx(self, tx_id):
         return self.tx_log.get(tx_id)
@@ -203,22 +211,44 @@ class PaymentEngine:
             return None
         return Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'), rounding=ROUND_DOWN).normalize()
 
+    def attempt_normalize_record(self, record):
+        try:
+            self.normalize_record(record)
+        except (ValueError, InvalidOperation) as e:
+            self.error_log(f"field format error: {e} while attempting to normalize row like: {repr(record)}")
+            return False
+        except Exception as e:
+            self.error_log(f"{e} while attempting to normalize row like: {repr(record)}")
+            return False
+
+        return True
+
     def normalize_record(self, record):
         record[self.type_field_idx] = record[self.type_field_idx].strip()
         record[self.client_field_idx] = int(record[self.client_field_idx].strip())
         record[self.tx_field_idx] = int(record[self.tx_field_idx].strip())
         amount = self.get_normalized_amount(record)
-        if amount:
+        if amount is not None:
             record[self.amount_field_idx] = amount
-        return record
 
     def validate_record(self, record):
-        if record[self.type_field_idx] not in self.valid_record_types:
-            print(self.valid_record_types)
-            print(record[self.type_field_idx])
-            print(record[self.type_field_idx] in self.valid_record_types)
-            print(repr(record[self.type_field_idx]))
-            raise ValueError(f"invalid record type: {record[self.type_field_idx]}")
+        record_type = record[self.type_field_idx]
+        client_id = record[self.client_field_idx]
+        tx_id = record[self.tx_field_idx]
+
+        if record_type not in self.valid_record_types:
+            self.error_log("invalid record_type", tx_id, client_id, record_type)
+            return False
+
+        if not (1 <= tx_id <= 4294967295):
+            self.error_log("invalid tx_id", tx_id, client_id, record_type)
+            return False
+
+        if not (1 <= client_id <= 65535):
+            self.error_log("invalid client_id", tx_id, client_id, record_type)
+            return False
+
+        return True
 
     def get_account_totals(self):
         self.read_transaction_data()
