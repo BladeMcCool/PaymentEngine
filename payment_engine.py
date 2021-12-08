@@ -16,19 +16,56 @@ class PaymentEngine:
         self.valid_record_types = {"deposit", "withdrawal", "dispute", "resolve", "chargeback"}
         self.tx_log = {}
 
-        self.type_field_idx = 0
-        self.client_field_idx = 1
-        self.tx_field_idx = 2
-        self.amount_field_idx = 3
+        self.type_field_idx = None
+        self.client_field_idx = None
+        self.tx_field_idx = None
+        self.amount_field_idx = None
 
     def read_transaction_data(self):
         if not self.filename:
             raise RuntimeError("no filename to read has been set. aborting.")
         with open(self.filename) as file:
             csvreader = csv.reader(file)
-            _ = next(csvreader)  # read and discard header -- but maybe we should interpret it for record field order?
+            header = next(csvreader)
+            found_header = self.discover_field_order(header)
+            if not found_header:
+                self.process_record(header) # treat first line as a regular record in this case.
             for record in csvreader:
                 self.process_record(record)
+
+    def discover_field_order(self, header):
+        found_header = False
+        for idx, field in enumerate(header):
+            if field == "type":
+                self.type_field_idx = idx
+                found_header = True
+            elif field == "client":
+                self.client_field_idx = idx
+                found_header = True
+            elif field == "tx":
+                self.tx_field_idx = idx
+                found_header = True
+            elif field == "amount":
+                self.amount_field_idx = idx
+                found_header = True
+
+        if found_header:
+            # ensure we figured out all the fields or abort.
+            if None in [
+                self.type_field_idx,
+                self.client_field_idx,
+                self.tx_field_idx,
+                self.amount_field_idx,
+            ]:
+                raise RuntimeError("could not determine field order")
+        else:
+            # go with default field order if there was believed to be no header.
+            self.type_field_idx = 0
+            self.client_field_idx = 1
+            self.tx_field_idx = 2
+            self.amount_field_idx = 3
+
+        return found_header
 
     def get_client_record(self, client_id):
         if client_id not in self.account_totals:
@@ -52,13 +89,13 @@ class PaymentEngine:
         client_id = record[self.client_field_idx]
         tx_id = record[self.tx_field_idx]
 
-        existing_tx = self.get_tx(tx_id)
 
+        client_accounting = self.get_client_record(client_id)
+
+        existing_tx = self.get_tx(tx_id)
         if existing_tx and existing_tx[1] != client_id:
             self.error_log("tx client_id mismatch", tx_id, client_id, record_type)
             return
-
-        client_accounting = self.get_client_record(client_id)
 
         if record_type == "deposit":
             self.process_deposit(client_accounting, existing_tx, tx_id, client_id, record)
@@ -70,6 +107,11 @@ class PaymentEngine:
             self.process_resolve(client_accounting, existing_tx, tx_id, client_id)
         elif record_type == "chargeback":
             self.process_chargeback(client_accounting, existing_tx, tx_id, client_id)
+
+    def check_client_locked(self, client_accounting, tx_id, client_id, record_type):
+        if client_accounting["locked"] is True:
+            self.error_log("client is locked", tx_id, client_id, record_type)
+            return
 
     def process_deposit(self, client_accounting, existing_tx, tx_id, client_id, record):
         amount = record[self.amount_field_idx]
@@ -209,7 +251,10 @@ class PaymentEngine:
             return None
         if not record[self.amount_field_idx]:
             return None
-        return Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'), rounding=ROUND_DOWN).normalize()
+        normalized_amount = Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'), rounding=ROUND_DOWN).normalize()
+        if normalized_amount < 0:
+            raise ValueError("negative amounts disallowed")
+        return normalized_amount
 
     def attempt_normalize_record(self, record):
         try:

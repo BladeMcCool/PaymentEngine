@@ -18,7 +18,9 @@ class TestAccounting(unittest.TestCase):
                 buffer.close()
 
     def get_payment_engine(self, filename=None):
-        return PaymentEngine(filename)
+        engine = PaymentEngine(filename)
+        engine.discover_field_order(["type", "client", "tx", "amount"])
+        return engine
 
     def test__invalid_client_id__rejected(self):
         # client id must be >= 1 and <= 65535
@@ -80,6 +82,13 @@ class TestAccounting(unittest.TestCase):
         with self.assertRaises(InvalidOperation):
             engine.get_normalized_amount(["deposit", "1", "1", ",122   . 99 , 1./234"])
 
+        # preventing negatives too
+        with self.assertRaises(ValueError):
+            engine.get_normalized_amount(["deposit", "1", "1", "-1"])
+
+        with self.assertRaises(ValueError):
+            engine.get_normalized_amount(["withdrawal", "1", "1", "-1"])
+
     def test__invalid_tx_type__ignored_and_logged(self):
         engine = self.get_payment_engine()
         with self.err_capture() as buffer:
@@ -129,7 +138,6 @@ class TestAccounting(unittest.TestCase):
         # though it may be silly, it doesnt seem unreasonable to allow deposit of 0, it should just have no actual effect on the balance.
         engine.process_record(["deposit", "55", "2", "0"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
-
 
     def test_deposit_existing_tx_id__ignored_and_logged(self):
         engine = self.get_payment_engine()
@@ -379,32 +387,48 @@ class TestAccounting(unittest.TestCase):
         # cannot do anything more on a tx that was either charged back or resolved.
         # i wanted to abstract this concept better but was running out of time.
         # so we have a lot of very similar code of checking tx flags in the various record processing functions.
+        # and possible redudancy in the flag checking given that the logic for not performing anything on locked clients
+        # had not been conceptualized yet.
 
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["dispute", "55", "1"])
         engine.process_record(["resolve", "55", "1"])
 
-        engine.process_record(["deposit", "55", "2", "5.67"])
-        engine.process_record(["dispute", "55", "2"])
-        engine.process_record(["chargeback", "55", "2"])
+        engine.process_record(["deposit", "56", "2", "5.67"])
+        engine.process_record(["dispute", "56", "2"])
+        engine.process_record(["chargeback", "56", "2"])
 
         with self.err_capture() as buffer:
             engine.process_record(["resolve", "55", "1"])
             engine.process_record(["chargeback", "55", "1"])
             engine.process_record(["dispute", "55", "1"])
 
-            engine.process_record(["chargeback", "55", "2"])
-            engine.process_record(["resolve", "55", "2"])
-            engine.process_record(["dispute", "55", "2"])
+            engine.process_record(["chargeback", "56", "2"])
+            engine.process_record(["resolve", "56", "2"])
+            engine.process_record(["dispute", "56", "2"])
 
             self.assertEqual((
                 "tx_id 1, client_id 55, failed to apply resolve: tx is already resolved\n"
                 "tx_id 1, client_id 55, failed to apply chargeback: tx is resolved\n"
                 "tx_id 1, client_id 55, failed to apply dispute: tx is resolved\n"
-                "tx_id 2, client_id 55, failed to apply chargeback: tx is already charged back\n"
-                "tx_id 2, client_id 55, failed to apply resolve: tx is charged back\n"
-                "tx_id 2, client_id 55, failed to apply dispute: tx is charged back\n"
+                "tx_id 2, client_id 56, failed to apply chargeback: client is locked\n"
+                "tx_id 2, client_id 56, failed to apply resolve: client is locked\n"
+                "tx_id 2, client_id 56, failed to apply dispute: client is locked\n"
+            ), buffer.getvalue())
+
+    def test__operation_on_locked_client__ignored_and_logged(self):
+        # this is an assumption on my part
+
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "2", "5.67"])
+        engine.process_record(["dispute", "55", "2"])
+        engine.process_record(["chargeback", "55", "2"])
+
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "55", "3", "2.99"])
+            self.assertEqual((
+                "tx_id 3, client_id 55, failed to apply deposit: client is locked\n"
             ), buffer.getvalue())
 
     def test__sample1_results_matches_expected(self):
@@ -421,8 +445,41 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal(2.0), account_totals[2]["total"])
         self.assertEqual(False, account_totals[2]["locked"])
 
-    def test__sample1_output_matches_expected(self):
+    def test__sample1__output_matches_expected(self):
         engine = PaymentEngine("fixtures/sample1.csv")
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            engine.generate_output()
+        csv_output = f.getvalue()
+        expect_output = ("client,available,held,total,locked\n"
+                         "1,1.5,0,1.5,false\n"
+                         "2,2,0,2,false\n")
+        self.assertEqual(expect_output, csv_output)
+
+    def test__no_header__assumes_default_field_order(self):
+        engine = PaymentEngine("fixtures/sample1a.csv")
+        engine.read_transaction_data()
+        self.assertEqual(0, engine.type_field_idx)
+        self.assertEqual(1, engine.client_field_idx)
+        self.assertEqual(2, engine.tx_field_idx)
+        self.assertEqual(3, engine.amount_field_idx)
+
+    def test__sample1a_no_header__output_matches_expected(self):
+        engine = PaymentEngine("fixtures/sample1a.csv")
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            engine.generate_output()
+        csv_output = f.getvalue()
+        expect_output = ("client,available,held,total,locked\n"
+                         "1,1.5,0,1.5,false\n"
+                         "2,2,0,2,false\n")
+        self.assertEqual(expect_output, csv_output)
+
+    def test__sample2__output_matches_expected(self):
+        # sample 2 uses nonstandard field order and has some junk columns to ignore
+        engine = PaymentEngine("fixtures/sample2.csv")
 
         f = io.StringIO()
         with redirect_stdout(f):
@@ -461,3 +518,6 @@ class TestAccounting(unittest.TestCase):
     # if input had too many decimal places are we rounding or truncating?
     # consider 180 day chargeback window? b/c otherwise we hae to track all tx ids indefinitely in memory or make use of the file system/external db
     #  ... theres no dates on the tx, so can't really know.
+
+    # allow deposit or withdrawal of negative amounts?
+    # allow any further operation to an client id that has been locked/frozen
