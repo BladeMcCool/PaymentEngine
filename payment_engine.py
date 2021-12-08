@@ -29,7 +29,7 @@ class PaymentEngine:
             header = next(csvreader)
             found_header = self.discover_field_order(header)
             if not found_header:
-                self.process_record(header) # treat first line as a regular record in this case.
+                self.process_record(header)  # treat first line as a regular record in this case.
             for record in csvreader:
                 self.process_record(record)
 
@@ -88,7 +88,6 @@ class PaymentEngine:
         record_type = record[self.type_field_idx]
         client_id = record[self.client_field_idx]
         tx_id = record[self.tx_field_idx]
-
 
         client_accounting = self.get_client_record(client_id)
 
@@ -251,7 +250,8 @@ class PaymentEngine:
             return None
         if not record[self.amount_field_idx]:
             return None
-        normalized_amount = Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'), rounding=ROUND_DOWN).normalize()
+        normalized_amount = Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'),
+                                                                            rounding=ROUND_DOWN).normalize()
         if normalized_amount < 0:
             raise ValueError("negative amounts disallowed")
         return normalized_amount
