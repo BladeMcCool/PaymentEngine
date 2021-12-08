@@ -21,7 +21,6 @@ class TestAccounting(unittest.TestCase):
         filepath = None
         if filename is not None:
             filepath = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + 'fixtures' + os.path.sep + filename
-        # raise Exception(filepath)
         engine = PaymentEngine(filepath)
         engine.discover_field_order(["type", "client", "tx", "amount"])
         return engine
@@ -391,8 +390,8 @@ class TestAccounting(unittest.TestCase):
         # cannot do anything more on a tx that was either charged back or resolved.
         # i wanted to abstract this concept better but was running out of time.
         # so we have a lot of very similar code of checking tx flags in the various record processing functions.
-        # and possible redudancy in the flag checking given that the logic for not performing anything on locked clients
-        # had not been conceptualized yet.
+        # and possible redundancy in the flag checking given that the logic for not performing anything
+        # on locked clients had not been conceptualized yet.
 
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "55", "1", "1.23"])

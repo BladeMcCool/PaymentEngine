@@ -67,18 +67,7 @@ class PaymentEngine:
 
         return found_header
 
-    def get_client_record(self, client_id):
-        if client_id not in self.account_totals:
-            self.account_totals[client_id] = {
-                "available": Decimal(0),
-                "held": Decimal(0),
-                "total": Decimal(0),
-                "locked": False,
-            }
-        return self.account_totals[client_id]
-
     def process_record(self, record):
-
         if not self.attempt_normalize_record(record):
             return
 
@@ -107,7 +96,69 @@ class PaymentEngine:
         elif record_type == "chargeback":
             self.process_chargeback(client_accounting, existing_tx, tx_id, client_id)
 
+    def attempt_normalize_record(self, record):
+        try:
+            self.normalize_record(record)
+        except (ValueError, InvalidOperation) as e:
+            self.error_log(f"field format error: {e} while attempting to normalize row like: {repr(record)}")
+            return False
+        except Exception as e:
+            self.error_log(f"{e} while attempting to normalize row like: {repr(record)}")
+            return False
+
+        return True
+
+    def normalize_record(self, record):
+        record[self.type_field_idx] = record[self.type_field_idx].strip()
+        record[self.client_field_idx] = int(record[self.client_field_idx].strip())
+        record[self.tx_field_idx] = int(record[self.tx_field_idx].strip())
+        amount = self.get_normalized_amount(record)
+        if amount is not None:
+            record[self.amount_field_idx] = amount
+
+    def get_normalized_amount(self, record):
+        if record[self.type_field_idx] not in {"deposit", "withdrawal"}:
+            return None
+        if not record[self.amount_field_idx]:
+            return None
+        normalized_amount = Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'),
+                                                                            rounding=ROUND_DOWN).normalize()
+        if normalized_amount < 0:
+            raise ValueError("negative amounts disallowed")
+        return normalized_amount
+
+    def validate_record(self, record):
+        record_type = record[self.type_field_idx]
+        client_id = record[self.client_field_idx]
+        tx_id = record[self.tx_field_idx]
+
+        if record_type not in self.valid_record_types:
+            self.error_log("invalid record_type", tx_id, client_id, record_type)
+            return False
+
+        if not (1 <= tx_id <= 4294967295):
+            self.error_log("invalid tx_id", tx_id, client_id, record_type)
+            return False
+
+        if not (1 <= client_id <= 65535):
+            self.error_log("invalid client_id", tx_id, client_id, record_type)
+            return False
+
+        return True
+
+    def get_client_record(self, client_id):
+        if client_id not in self.account_totals:
+            self.account_totals[client_id] = {
+                "available": Decimal(0),
+                "held": Decimal(0),
+                "total": Decimal(0),
+                "locked": False,
+            }
+        return self.account_totals[client_id]
+
     def check_client_locked(self, client_accounting, tx_id, client_id, record_type):
+        # there was a test (since removed) that covered this, but needed to do this in the first place was an
+        # undocumented assumption. so, not using this at the moment.
         if client_accounting["locked"] is True:
             self.error_log("client is locked", tx_id, client_id, record_type)
             return
@@ -244,56 +295,6 @@ class PaymentEngine:
             return
 
         self.tx_log[tx_id][0] |= tx_type
-
-    def get_normalized_amount(self, record):
-        if record[self.type_field_idx] not in {"deposit", "withdrawal"}:
-            return None
-        if not record[self.amount_field_idx]:
-            return None
-        normalized_amount = Decimal(record[self.amount_field_idx]).quantize(Decimal('.0001'),
-                                                                            rounding=ROUND_DOWN).normalize()
-        if normalized_amount < 0:
-            raise ValueError("negative amounts disallowed")
-        return normalized_amount
-
-    def attempt_normalize_record(self, record):
-        try:
-            self.normalize_record(record)
-        except (ValueError, InvalidOperation) as e:
-            self.error_log(f"field format error: {e} while attempting to normalize row like: {repr(record)}")
-            return False
-        except Exception as e:
-            self.error_log(f"{e} while attempting to normalize row like: {repr(record)}")
-            return False
-
-        return True
-
-    def normalize_record(self, record):
-        record[self.type_field_idx] = record[self.type_field_idx].strip()
-        record[self.client_field_idx] = int(record[self.client_field_idx].strip())
-        record[self.tx_field_idx] = int(record[self.tx_field_idx].strip())
-        amount = self.get_normalized_amount(record)
-        if amount is not None:
-            record[self.amount_field_idx] = amount
-
-    def validate_record(self, record):
-        record_type = record[self.type_field_idx]
-        client_id = record[self.client_field_idx]
-        tx_id = record[self.tx_field_idx]
-
-        if record_type not in self.valid_record_types:
-            self.error_log("invalid record_type", tx_id, client_id, record_type)
-            return False
-
-        if not (1 <= tx_id <= 4294967295):
-            self.error_log("invalid tx_id", tx_id, client_id, record_type)
-            return False
-
-        if not (1 <= client_id <= 65535):
-            self.error_log("invalid client_id", tx_id, client_id, record_type)
-            return False
-
-        return True
 
     def get_account_totals(self):
         self.read_transaction_data()
