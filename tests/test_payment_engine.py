@@ -6,18 +6,17 @@ from decimal import Decimal
 from payment_engine import PaymentEngine
 
 
-
-@contextlib.contextmanager
-def err_capture():
-    buffer = io.StringIO()
-    with redirect_stderr(buffer):
-        try:
-            yield buffer
-        finally:
-            buffer.close()
-
-
 class TestAccounting(unittest.TestCase):
+
+    @contextlib.contextmanager
+    def err_capture(self):
+        buffer = io.StringIO()
+        with redirect_stderr(buffer):
+            try:
+                yield buffer
+            finally:
+                buffer.close()
+
     def get_payment_engine(self, filename=None):
         return PaymentEngine(filename)
 
@@ -61,33 +60,19 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
-    def test_redeposit_existing_tx_id__ignored_and_logged(self):
+    def test_deposit_existing_tx_id__ignored_and_logged(self):
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
-            engine.process_record(["deposit", "55", "1", "1.23"])
-            engine.process_record(["deposit", "55", "1", "999.99"])
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "12.23"])
+            engine.process_record(["withdrawal", "55", "2", "3.45"])
+            engine.process_record(["deposit", "55", "2", "999.99"])
             self.assertEqual(
-                "tx_id 1, client_id 55, failed to apply deposit of $999.99: deposit duplicates existing tx_id\n",
+                "tx_id 2, client_id 55, failed to apply deposit of $999.99: deposit duplicates existing tx_id\n",
                 buffer.getvalue()
             )
 
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
-
-    def test__withdrawal_nsf__ignored_and_logged(self):
-        engine = self.get_payment_engine()
-
-        engine.process_record(["deposit", "55", "1", "1.23"])
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
-
-        with err_capture() as buffer:
-            engine.process_record(["withdrawal", "55", "1", "1.24"])
-            self.assertEqual("tx_id 1, client_id 55, failed to apply withdrawal of $1.24: nsf\n", buffer.getvalue())
-
-        # available and total funds unchanged
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
-        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+        self.assertEqual(Decimal("8.78"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("8.78"), engine.account_totals[55]["total"])
 
     def test__withdrawal__debits_account(self):
         engine = self.get_payment_engine()
@@ -98,10 +83,38 @@ class TestAccounting(unittest.TestCase):
         self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
         # withdraw it
-        engine.process_record(["withdrawal", "55", "1", "1.23"])
+        engine.process_record(["withdrawal", "55", "2", "1.23"])
         self.assertEqual(Decimal("0"), engine.account_totals[55]["available"])
         self.assertEqual(Decimal("0"), engine.account_totals[55]["total"])
         self.assertFalse(engine.account_totals[55]["locked"])
+
+    def test__withdrawal_nsf__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+        with self.err_capture() as buffer:
+            engine.process_record(["withdrawal", "55", "2", "1.24"])
+            self.assertEqual("tx_id 2, client_id 55, failed to apply withdrawal of $1.24: nsf\n", buffer.getvalue())
+
+        # available and total funds unchanged
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
+
+    def test_withdrawal_existing_tx_id__ignored_and_logged(self):
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "1.23"])
+            engine.process_record(["withdrawal", "55", "1", "1.23"])
+            self.assertEqual(
+                "tx_id 1, client_id 55, failed to apply withdrawal of $1.23: withdrawal duplicates existing tx_id\n",
+                buffer.getvalue()
+            )
+
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["available"])
+        self.assertEqual(Decimal("1.23"), engine.account_totals[55]["total"])
 
     def test__dispute__holds_funds(self):
         engine = self.get_payment_engine()
@@ -122,7 +135,7 @@ class TestAccounting(unittest.TestCase):
 
     def test__dispute_nonexisting_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["dispute", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx not found\n", buffer.getvalue())
 
@@ -130,23 +143,24 @@ class TestAccounting(unittest.TestCase):
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "44", "987", "1.23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["dispute", "55", "987"])
-            self.assertEqual("tx_id 987, client_id 55, failed to apply dispute: tx client_id mismatch\n", buffer.getvalue())
+            self.assertEqual("tx_id 987, client_id 55, failed to apply dispute: tx client_id mismatch\n",
+                             buffer.getvalue())
 
     def test__dispute_nondeposit_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["dispute", "55", "2"])
             self.assertEqual("tx_id 2, client_id 55, failed to apply dispute: tx is not a deposit\n", buffer.getvalue())
 
     def test__dispute_chargedback_tx__ignored_and_logged(self):
         # cannot dispute something that was already chargedback
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["deposit", "55", "1", "1.23"])
             engine.process_record(["dispute", "55", "1"])
             engine.process_record(["chargeback", "55", "1"])
@@ -156,13 +170,21 @@ class TestAccounting(unittest.TestCase):
     def test__dispute_resolved_tx__ignored_and_logged(self):
         # cannot dispute something that was already resolved
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["deposit", "55", "1", "1.23"])
             engine.process_record(["dispute", "55", "1"])
             engine.process_record(["resolve", "55", "1"])
             engine.process_record(["dispute", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is resolved\n", buffer.getvalue())
 
+    def test__dispute_disputed_tx__ignored_and_logged(self):
+        # cannot dispute something that is already under dispute
+        engine = self.get_payment_engine()
+        with self.err_capture() as buffer:
+            engine.process_record(["deposit", "55", "1", "1.23"])
+            engine.process_record(["dispute", "55", "1"])
+            engine.process_record(["dispute", "55", "1"])
+            self.assertEqual("tx_id 1, client_id 55, failed to apply dispute: tx is already disputed\n", buffer.getvalue())
 
     def test__resolve__releases_funds(self):
         engine = self.get_payment_engine()
@@ -188,7 +210,7 @@ class TestAccounting(unittest.TestCase):
 
     def test__resolve_nonexisting_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["resolve", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx not found\n", buffer.getvalue())
 
@@ -197,7 +219,7 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["resolve", "55", "2"])
             self.assertEqual("tx_id 2, client_id 55, failed to apply resolve: tx is not a deposit\n", buffer.getvalue())
 
@@ -206,7 +228,7 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["resolve", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx is not disputed\n", buffer.getvalue())
 
@@ -218,7 +240,7 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["dispute", "55", "1"])
         engine.process_record(["chargeback", "55", "1"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["resolve", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply resolve: tx is charged back\n", buffer.getvalue())
 
@@ -246,7 +268,7 @@ class TestAccounting(unittest.TestCase):
 
     def test__chargeback_nonexisting_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["chargeback", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx not found\n", buffer.getvalue())
 
@@ -255,18 +277,20 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["chargeback", "55", "2"])
-            self.assertEqual("tx_id 2, client_id 55, failed to apply chargeback: tx is not a deposit\n", buffer.getvalue())
+            self.assertEqual("tx_id 2, client_id 55, failed to apply chargeback: tx is not a deposit\n",
+                             buffer.getvalue())
 
     def test__chargeback_nondisputed_tx__ignored_and_logged(self):
         engine = self.get_payment_engine()
         engine.process_record(["deposit", "55", "1", "1.23"])
         engine.process_record(["withdrawal", "55", "2", ".23"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["chargeback", "55", "1"])
-            self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is not disputed\n", buffer.getvalue())
+            self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is not disputed\n",
+                             buffer.getvalue())
 
     def test__chargeback_resolved_tx__ignored_and_logged(self):
         # cannot charge back a tx that was resolved
@@ -275,35 +299,42 @@ class TestAccounting(unittest.TestCase):
         engine.process_record(["dispute", "55", "1"])
         engine.process_record(["resolve", "55", "1"])
 
-        with err_capture() as buffer:
+        with self.err_capture() as buffer:
             engine.process_record(["chargeback", "55", "1"])
             self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is resolved\n", buffer.getvalue())
 
-    # def test__operation_on_finalized_tx__ignored_and_logged(self):
-    #     # cannot do anything more on a tx that was either charged back or resolved.
-    #
-    #     # cannot charge back a tx that was resolved
-    #     engine = self.get_payment_engine()
-    #     engine.process_record(["deposit", "55", "1", "1.23"])
-    #     engine.process_record(["dispute", "55", "1"])
-    #     engine.process_record(["resolve", "55", "1"])
-    #
-    #     with err_capture() as buffer:
-    #         engine.process_record(["chargeback", "55", "1"])
-    #         self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is finalized\n", buffer.getvalue())
-    #
-    #     # cannot charge back a tx that was charged back
-    #     engine = self.get_payment_engine()
-    #     engine.process_record(["deposit", "55", "1", "1.23"])
-    #     engine.process_record(["dispute", "55", "1"])
-    #     engine.process_record(["chargeback", "55", "1"])
-    #
-    #     with err_capture() as buffer:
-    #         engine.process_record(["chargeback", "55", "1"])
-    #         self.assertEqual("tx_id 1, client_id 55, failed to apply chargeback: tx is finalized\n", buffer.getvalue())
-    #
-    #
-    #     raise NotImplementedError("probably add a finalized flag")
+    def test__operation_on_finalized_tx__ignored_and_logged(self):
+        # cannot do anything more on a tx that was either charged back or resolved.
+        # i wanted to abstract this concept better but was running out of time.
+        # so we have a lot of very similar code of checking tx flags in the various record processing functions.
+
+        engine = self.get_payment_engine()
+        engine.process_record(["deposit", "55", "1", "1.23"])
+        engine.process_record(["dispute", "55", "1"])
+        engine.process_record(["resolve", "55", "1"])
+
+        engine.process_record(["deposit", "55", "2", "5.67"])
+        engine.process_record(["dispute", "55", "2"])
+        engine.process_record(["chargeback", "55", "2"])
+
+        with self.err_capture() as buffer:
+            engine.process_record(["resolve", "55", "1"])
+            engine.process_record(["chargeback", "55", "1"])
+            engine.process_record(["dispute", "55", "1"])
+
+            engine.process_record(["chargeback", "55", "2"])
+            engine.process_record(["resolve", "55", "2"])
+            engine.process_record(["dispute", "55", "2"])
+
+            self.assertEqual((
+                "tx_id 1, client_id 55, failed to apply resolve: tx is already resolved\n"
+                "tx_id 1, client_id 55, failed to apply chargeback: tx is resolved\n"
+                "tx_id 1, client_id 55, failed to apply dispute: tx is resolved\n"
+                "tx_id 2, client_id 55, failed to apply chargeback: tx is already charged back\n"
+                "tx_id 2, client_id 55, failed to apply resolve: tx is charged back\n"
+                "tx_id 2, client_id 55, failed to apply dispute: tx is charged back\n"
+            ), buffer.getvalue())
+
 
     def test__sample1_results_matches_expected(self):
         engine = PaymentEngine("fixtures/sample1.csv")
@@ -359,3 +390,4 @@ class TestAccounting(unittest.TestCase):
     # if input had too many decimal places are we rounding or truncating?
     # consider 180 day chargeback window? b/c otherwise we hae to track all tx ids indefinitely in memory or make use of the file system/external db
     #  ... theres no dates on the tx, so can't really know.
+

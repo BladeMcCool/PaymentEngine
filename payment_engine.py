@@ -56,9 +56,9 @@ class PaymentEngine:
         client_accounting = self.get_client_record(client_id)
 
         if record_type == "deposit":
-            self.process_deposit(client_accounting, record, existing_tx, tx_id, client_id)
+            self.process_deposit(client_accounting, existing_tx, tx_id, client_id, record)
         elif record_type == "withdrawal":
-            self.process_withdrawal(client_accounting, record, tx_id, client_id)
+            self.process_withdrawal(client_accounting,existing_tx, tx_id, client_id, record)
         elif record_type == "dispute":
             self.process_dispute(client_accounting, existing_tx, tx_id, client_id)
         elif record_type == "resolve":
@@ -66,7 +66,7 @@ class PaymentEngine:
         elif record_type == "chargeback":
             self.process_chargeback(client_accounting, existing_tx, tx_id, client_id)
 
-    def process_deposit(self, client_accounting, record, existing_tx, tx_id, client_id):
+    def process_deposit(self, client_accounting, existing_tx, tx_id, client_id, record):
         amount = record[self.amount_field_idx]
         if existing_tx:
             self.error_log("deposit duplicates existing tx_id", tx_id, client_id, "deposit", amount)
@@ -76,10 +76,15 @@ class PaymentEngine:
         client_accounting["total"] += amount
         self.add_tx_log(tx_id, client_id, self.FLAG_DEPOSIT, amount)
 
-    def process_withdrawal(self, client_accounting, record, tx_id, client_id):
+    def process_withdrawal(self, client_accounting, existing_tx, tx_id, client_id, record):
+        record_type = "withdrawal"
         amount = record[self.amount_field_idx]
+        if existing_tx:
+            self.error_log("withdrawal duplicates existing tx_id", tx_id, client_id, record_type, amount)
+            return
+
         if client_accounting["available"] < amount:
-            self.error_log("nsf", tx_id, client_id, "withdrawal", amount)
+            self.error_log("nsf", tx_id, client_id, record_type, amount)
             return
 
         client_accounting["available"] -= amount
@@ -102,6 +107,10 @@ class PaymentEngine:
 
         if self.check_tx(existing_tx, self.FLAG_RESOLVE):
             self.error_log("tx is resolved", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_DISPUTE):
+            self.error_log("tx is already disputed", tx_id, client_id, record_type)
             return
 
         amount = existing_tx[2]
@@ -127,6 +136,10 @@ class PaymentEngine:
             self.error_log("tx is charged back", tx_id, client_id, record_type)
             return
 
+        if self.check_tx(existing_tx, self.FLAG_RESOLVE):
+            self.error_log("tx is already resolved", tx_id, client_id, record_type)
+            return
+
         amount = existing_tx[2]
         client_accounting["held"] -= amount
         client_accounting["available"] += amount
@@ -144,6 +157,10 @@ class PaymentEngine:
 
         if not self.check_tx(existing_tx, self.FLAG_DISPUTE):
             self.error_log("tx is not disputed", tx_id, client_id, record_type)
+            return
+
+        if self.check_tx(existing_tx, self.FLAG_CHARGEBACK):
+            self.error_log("tx is already charged back", tx_id, client_id, record_type)
             return
 
         if self.check_tx(existing_tx, self.FLAG_RESOLVE):
