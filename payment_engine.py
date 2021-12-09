@@ -85,6 +85,7 @@ class PaymentEngine:
             self.error_log("tx client_id mismatch", tx_id, client_id, record_type)
             return
 
+
         if record_type == "deposit":
             self.process_deposit(client_accounting, existing_tx, tx_id, client_id, record)
         elif record_type == "withdrawal":
@@ -270,6 +271,9 @@ class PaymentEngine:
         client_accounting["locked"] = True
         self.add_tx_log(tx_id, client_id, self.FLAG_CHARGEBACK, amount)
 
+    def check_tx(self, tx, tx_type):
+        return tx[0] & tx_type
+
     def error_log(self, message, tx_id=None, client_id=None, record_type=None, amount=None):
         if tx_id is not None and client_id is not None and record_type is not None:
             formatted_prefix = f"tx_id {tx_id}, client_id {client_id}, failed to apply {record_type}"
@@ -282,9 +286,6 @@ class PaymentEngine:
 
     def get_tx(self, tx_id):
         return self.tx_log.get(tx_id)
-
-    def check_tx(self, tx, tx_type):
-        return tx[0] & tx_type
 
     def add_tx_log(self, tx_id, client_id, tx_type, amount):
         # we will have an issue if we dont have enough memory for all the tx tracking.

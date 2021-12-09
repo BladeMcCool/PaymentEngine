@@ -420,7 +420,7 @@ class TestAccounting(unittest.TestCase):
                 "tx_id 2, client_id 56, failed to apply dispute: tx is charged back\n"
             ), buffer.getvalue())
 
-    def test__sample1_results_matches_expected(self):
+    def test__sample1_results__matches_expected(self):
         engine = self.get_payment_engine("sample1.csv")
         account_totals = engine.get_account_totals()
 
