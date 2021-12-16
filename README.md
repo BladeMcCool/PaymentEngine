@@ -22,4 +22,4 @@ Additionally, the implementation of a state machine for the transactions themsel
 
 Client accounts can end up locked after a chargeback. In the absence of requirements for specific behavior to take with regards to accounts which have become locked, we will continue processing transactions discovered for a given client even after that client has become locked.
 
-Any non fatal errors encountered while processing will be logged to stdout.
+Any non fatal errors encountered while processing will be logged to stderr.
